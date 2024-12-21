@@ -1,0 +1,461 @@
+
+import pandas as pd
+import numpy as np
+from numpy import array
+import keras
+from keras import backend as K
+import tensorflow as tf
+from tensorflow.keras import initializers
+tf.random.set_seed(696969696969)
+from keras.preprocessing.sequence import TimeseriesGenerator
+from keras.layers.core import Dense, Activation, Dropout
+import plotly.graph_objects as go
+import plotly.express as px
+import pandas_market_calendars as mcal
+from datetime import timedelta
+from datetime import datetime
+import time
+import yfinance as yahooFinance
+import datetime
+from datetime import date
+import calendar
+import os
+from numpy import hstack
+from keras.callbacks import EarlyStopping
+from keras.layers import Input, LSTM, Dense, LSTMCell, RNN, Bidirectional, concatenate, TimeDistributed, MultiHeadAttention
+import matplotlib.pyplot as plt
+import random
+
+
+# build path so the PythonScript folder can be placed on any desktop and code will run
+root = os.getcwd()
+path = "\\Desktop\\PythonScript\\"
+directory = os.getcwd() + path
+
+# ticker_list.csv must be included
+etf_picker = pd.read_csv(directory + 'etf_cluster_analysis.csv')
+etf_picker = etf_picker[etf_picker['cluster']==0]
+ticker_list = etf_picker['ticker'].unique()
+#ticker_list = ['XAR']
+
+# create empty dataframe and save for appending
+returns_df = pd.DataFrame(columns = ['prediction','actual','mean','ticker','returns','buy_flag','same_slope','slope','std_dev_pred','std_dev_slope','actual_ten_pc','win_ten_pc','date'])
+returns_df.to_csv(directory + '\\forecasts\\seq2seq_results.csv')
+
+# create empty dataframe and save for appending
+summary = pd.DataFrame(columns = ['mse','avg_roi','num_of_investments','ticker','future_pred','buy_flag'])
+summary.to_csv(directory + '\\forecasts\\seq2seq_summary.csv')
+
+startDate = datetime.datetime(2015, 1, 1)
+endDate = date.today()
+
+for index in range(len(ticker_list)):
+#for index in range(10):
+    s = 1
+    while s < 7:
+    
+        #print(random.uniform(-.01, .01))
+        #break
+        print(ticker_list[index])
+        
+        # get data 
+        load = yahooFinance.Ticker(ticker_list[index])
+        data = load.history(start=startDate, end=endDate)
+        df = load.history(start=startDate, end=endDate)
+        
+        df['Date'] = pd.to_datetime(df.index)
+        from datetime import datetime
+        df['Month_Number'] = pd.to_datetime(df['Date']).dt.month
+        df['Year'] = pd.to_datetime(df['Date']).dt.year
+        
+        df = df.groupby(['Year','Month_Number']).agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last','Volume':'sum','Date':'last'})
+        
+        if len(df) < 48:
+            s = 6
+            continue
+        
+        df['pc_close'] = (df['Close'] - df['Close'].shift(1, axis=0))/df['Close'].shift(1, axis=0)
+        df['pc_high'] = (df['High'] - df['High'].shift(1, axis=0))/df['High'].shift(1, axis=0)
+        df['pc_low'] = (df['Low'] - df['Low'].shift(1, axis=0))/df['Low'].shift(1, axis=0)
+        df['pc_open'] = (df['Open'] - df['Open'].shift(1, axis=0))/df['Open'].shift(1, axis=0)
+        df['pc_volume'] = (df['Volume'] - df['Volume'].shift(1, axis=0))/df['Volume'].shift(1, axis=0)        
+        
+        # trim off NA's
+        df = df[1:len(df)]
+        df = df.drop(['High','Open','Volume'],axis=1)
+        print(df)
+        
+        close_data = df['pc_close'].values
+        close_data = close_data.reshape((-1,1))
+        scaled = close_data
+        
+        high_data = df['pc_high'].values
+        high_data = high_data.reshape((-1,1))
+        
+        low_data = df['pc_low'].values
+        low_data = low_data.reshape((-1,1))
+        
+        open_data = df['pc_open'].values
+        open_data = open_data.reshape((-1,1))
+
+        volume_data = df['pc_volume'].values
+        volume_data = volume_data.reshape((-1,1))
+        
+        r = list()
+        r2 = list()
+        rl = list()
+        rl2 = list()
+        for i in range(len(df)):
+            rand = scaled[i]+(scaled[i]*random.uniform(-.1, .1))
+            rand_low = low_data[i]+(low_data[i]*random.uniform(-.1, .1))
+            rand2 = scaled[i]+(scaled[i]*random.uniform(-.1, .1))
+            rand_low2 = low_data[i]+(low_data[i]*random.uniform(-.1, .1))
+            
+            r.append(rand)
+            r_a = array(r)
+            random_v = r_a.reshape((-1,1))
+
+            r2.append(rand2)
+            r2_a = array(r2)
+            random_v2 = r2_a.reshape((-1,1))
+            
+            rl.append(rand_low)
+            rl_a = array(rl)
+            random_low = rl_a.reshape((-1,1))
+            
+            rl2.append(rand_low2)
+            rl2_a = array(rl2)
+            random_low2 = rl2_a.reshape((-1,1))
+        
+        conc = np.concatenate((random_v, scaled), axis=0)
+        
+        conc_low = np.concatenate((random_low, low_data), axis=0)
+        
+        #break 
+        n_test_range = 17
+        input_seq_len = 3
+        output_seq_len = 1
+        n_in_features = 2
+        n_out_features = 1
+        batch_size = 32
+        if s < 4:
+            epochs = 30
+        else:
+            epochs = 14
+        batches = 1
+
+        
+        # define input sequence
+        in_seq1 = conc #scaled
+        in_seq2 = high_data
+        in_seq3 = conc_low #low_data
+        in_seq4 = open_data
+        in_seq5 = volume_data
+        out_seq = conc #scaled
+        # convert to [rows, columns] structure
+        in_seq1 = in_seq1.reshape((len(in_seq1), 1))
+        in_seq2 = in_seq2.reshape((len(in_seq2), 1))
+        in_seq3 = in_seq3.reshape((len(in_seq3), 1)) # used to be 1, 2, 1, 2, 1
+        in_seq4 = in_seq4.reshape((len(in_seq4), 1))
+        in_seq5 = in_seq5.reshape((len(in_seq5), 1))
+        out_seq = out_seq.reshape((len(out_seq), 1))
+        # horizontally stack columns
+        dataset = hstack((in_seq1, in_seq3, out_seq))
+        train_dataset = dataset[:len(dataset)-n_test_range+input_seq_len]
+        test_dataset = dataset[-n_test_range:]
+        choose_col_in = [*range(0,n_in_features)]
+        choose_col_out = n_in_features
+     
+        keras.backend.clear_session()
+
+        def generate_train_sequences(sequence, n_steps_in, n_steps_out):
+            X, y = list(), list()
+            for i in range(len(sequence)+n_steps_out):
+                # find the end of this pattern
+                end_ix = i + n_steps_in
+                out_end_ix = end_ix + n_steps_out
+                # check if we are beyond the sequence
+                if out_end_ix > len(sequence):
+                    break
+                # gather input and output parts of the pattern
+                seq_x, seq_y = sequence[:,choose_col_in][i:end_ix], sequence[:,choose_col_out][end_ix:out_end_ix]
+                X.append(seq_x)
+                y.append(seq_y)
+                input_seq = array(X)
+                output_seq = array(y)
+            return input_seq, output_seq
+
+        def plot_loss(train_loss,val_loss):
+            plt.figure(figsize=(10,6))
+            plt.plot(train_loss)
+            plt.plot(val_loss)
+
+            plt.xlabel('Epoch')
+            plt.ylabel('Mean Sqquared Error Loss')
+            plt.title('Loss Over Time')
+            plt.legend(['Train','Valid'])
+            plt.show()
+        
+        # to run python C:\Users\Anthony\Desktop\PythonScript\x_seq2seq_9_final_test_aug.py
+        initializer = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None)
+        kernel_initializer=tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None)
+        bias_initializer=tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None)
+        
+        def create_model(layers, bidirectional=False):
+            
+            n_layers = len(layers)
+            
+            ## Encoder , recurrent_initializer='zeros'
+            encoder_inputs = keras.layers.Input(shape=(None, n_in_features))
+            lstm_cells = [keras.layers.LSTMCell(hidden_dim, activation='tanh', dropout=.2, recurrent_initializer=initializer, kernel_initializer=kernel_initializer,bias_initializer=bias_initializer) for hidden_dim in layers]
+            if bidirectional:
+                encoder = Bidirectional(RNN(lstm_cells, return_sequences=True, return_state=True, go_backwards=True), merge_mode="concat")
+                encoder_outputs, forward_h, forward_c, forward_h2, forward_h3, backward_h, backward_c, backward_h2, backward_h3 = encoder(encoder_inputs)
+                encoder_states = [forward_h, forward_h2, forward_h3, forward_c, backward_h, backward_h2, backward_h3, backward_c]
+                
+            else:  
+                encoder = keras.layers.RNN(lstm_cells, return_sequences=True, return_state=True, go_backwards=True)
+                encoder_outputs_and_states = encoder(encoder_inputs)
+                #encoder_outputs, state_h, state_c = encoder(encoder_inputs)
+                encoder_states = encoder_outputs_and_states[1:]
+            
+            ## Decoder
+            decoder_inputs = keras.layers.Input(shape=(None, n_out_features))
+            if bidirectional:
+                decoder_cells = [keras.layers.LSTMCell(hidden_dim, activation='tanh', dropout=.2, recurrent_initializer=initializer) for hidden_dim in layers]
+                decoder_lstm = Bidirectional(keras.layers.RNN(decoder_cells, return_sequences=True, return_state=True, go_backwards=True), merge_mode="concat")
+            else:
+                decoder_cells = [keras.layers.LSTMCell(hidden_dim, activation='tanh', dropout=.2, recurrent_initializer=initializer, kernel_initializer=kernel_initializer,bias_initializer=bias_initializer) for hidden_dim in layers]
+                decoder_lstm = keras.layers.RNN(decoder_cells, return_sequences=True, return_state=True, go_backwards=True)
+                
+            #decoder_lstm = keras.layers.RNN(decoder_cells, return_sequences=True, return_state=True)
+            decoder_outputs_and_states = decoder_lstm(decoder_inputs, initial_state=encoder_states)
+            decoder_outputs = decoder_outputs_and_states[0]
+            #attention = MultiHeadAttention(num_heads=2, key_dim=2)(decoder_outputs)
+            decoder_dense1 = Dense(10, activation='tanh', kernel_initializer=kernel_initializer,bias_initializer=bias_initializer)
+            decoder_outputs1 = decoder_dense1(decoder_outputs)
+            decoder_dense = TimeDistributed(Dense(n_out_features, activation='sigmoid'))
+            decoder_outputs = decoder_dense(decoder_outputs1)
+            
+            model = keras.models.Model([encoder_inputs,decoder_inputs], decoder_outputs)
+            return model
+
+        #We pass the hidden dimensions in each layer in the form of a list.
+        #so length of the list becomes depth of the network.
+        if s < 4:
+            neurons = 64
+        else:
+            neurons = 288
+        
+        
+        model = create_model([neurons,neurons,neurons,neurons], bidirectional = False)
+        
+        
+        def run_model(model,batches,epochs,batch_size):
+
+            for _ in range(batches):
+                input_seq, output_seq = generate_train_sequences(train_dataset, input_seq_len, output_seq_len)
+                encoder_input_data = input_seq
+                decoder_target_data = output_seq
+                decoder_input_data = np.zeros(decoder_target_data.shape)
+                es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=5)
+                history = model.fit([encoder_input_data, decoder_input_data], decoder_target_data,
+                                     batch_size=batch_size,
+                                     epochs=epochs,
+                                     validation_split=.3,
+                                     shuffle=True, callbacks=[es])
+                total_loss.append(history.history['loss'])
+                total_val_loss.append(history.history['val_loss'])
+        
+        
+        model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0002), loss = 'mse')
+        #model.save(directory + '\\forecasts\\seq2seq\\')
+        total_loss = []
+        total_val_loss = []
+        
+        start_time = time.time()
+        run_model(model,batches=batches, epochs=epochs,batch_size=batch_size)
+        #print("--- %s seconds ---" % (time.time() - start_time))
+        
+        total_loss = [j for i in total_loss for j in i]
+        total_val_loss = [j for i in total_val_loss for j in i]
+        #plot_loss(total_loss,total_val_loss)
+        
+        # make predictions
+        pred = list()
+        act = list()
+        for i in range(len(test_dataset)-input_seq_len):
+            input_seq_test = test_dataset[:,choose_col_in][i:i+input_seq_len].reshape((1,input_seq_len,n_in_features))
+            #print(input_seq_test)
+            output_seq_test = test_dataset[:,choose_col_out][i+input_seq_len]
+            output_seq_test = output_seq_test.reshape(1,-1)
+            decoder_input_test = np.zeros((1,output_seq_len,1))
+            
+            pred1 = model.predict([input_seq_test,decoder_input_test])
+            pred1 = pred1.reshape((-1))
+            act1 = output_seq_test.reshape((-1))
+            
+            pred.append(pred1)
+            pred_a = array(pred)
+            prediction = pred_a.reshape((-1))
+
+            act.append(act1)
+            act_a = array(act)
+            actual = act_a.reshape((-1))
+        
+        
+        
+        results_df = pd.DataFrame(zip(prediction, actual), columns=['prediction','actual'])
+        results_df['mean'] = results_df['prediction'].mean()
+        results_df['prediction'] = results_df['prediction'] - results_df['prediction'].mean()
+        print(results_df['prediction'])
+        results_df['ticker'] = ticker_list[index]
+        mean_fc = results_df['prediction'].mean()
+        
+        mse = (pow((results_df['actual']-results_df['prediction']),2)).mean()
+        std = results_df['prediction'].std()
+        
+        r = list()
+        b = list()
+        sl = list()
+        slo = list()
+        for i in range(len(results_df)-1):
+            very_small_num = abs(results_df['prediction'][i]) or max(results_df['prediction'])/100
+            slop = (results_df['prediction'][i+1]-results_df['prediction'][i])/very_small_num
+            if (results_df['prediction'][i+1]-results_df['prediction'][i])/very_small_num > 1 and results_df['prediction'][i+1] > std:
+                ret = results_df['actual'][i+1]
+                buy_flag = 1
+            else:
+                ret = 0
+                buy_flag = 0
+                
+            if ((results_df['prediction'][i+1]-results_df['prediction'][i])/very_small_num > 0 and (results_df['actual'][i+1]-results_df['actual'][i])/very_small_num > 0) or ((results_df['prediction'][i+1]-results_df['prediction'][i])/very_small_num < 0 and (results_df['actual'][i+1]-results_df['actual'][i])/very_small_num < 0): #results_df['mean'][i]:
+                same_slope = 1
+            else:
+                same_slope = 0
+            
+            r.append(ret)
+            r_a = array(r)
+            monthly_return = r_a.reshape((-1))
+
+            b.append(buy_flag)
+            b_a = array(b)
+            b_flag = b_a.reshape((-1))
+            
+            sl.append(same_slope)
+            s_a = array(sl)
+            s_flag = s_a.reshape((-1))
+            
+            slo.append(slop)
+            slo_a = array(slo)
+            slope = slo_a.reshape((-1)) 
+        
+        # trim to fit
+        results_df = results_df[1:len(results_df)]
+        results_df['returns'] = monthly_return
+        results_df['buy_flag'] = b_flag
+        results_df['same_slope'] = s_flag
+        results_df['slope'] = slope
+        std_dev_slope = results_df['slope'].std() 
+        results_df['std_dev_pred'] = std
+        results_df['std_dev_slope'] = std_dev_slope
+        
+        at = list()
+        for i in range(len(results_df)):
+            if results_df['actual'].iloc[i] >= .1:
+                a_ret = 1
+            else:
+                a_ret = 0
+            
+            at.append(a_ret)
+            at_a = array(at)
+            actual_ten = at_a.reshape((-1))
+
+        pw = list()
+        for i in range(len(results_df)):
+            if results_df['returns'].iloc[i] >= .1 and results_df['actual'].iloc[i] >= .1:
+                p_ret = 1
+            else:
+                p_ret = 0
+            
+            pw.append(p_ret)
+            pw_a = array(pw)
+            win_ten = pw_a.reshape((-1))
+        
+        results_df['actual_ten_pc'] = actual_ten
+        results_df['win_ten_pc'] = win_ten
+        
+        df.reset_index()
+        results_df['date'] = df['Date'][len(df)-n_test_range+input_seq_len+output_seq_len:len(df)].values
+        
+        roi_trimmed = monthly_return[monthly_return != 0][:len(monthly_return)-1]
+        avg_roi = np.average(roi_trimmed)
+        print(avg_roi)
+        
+        num_of_investments = len(roi_trimmed)
+
+        formed_data = [[mse,avg_roi, num_of_investments]]
+        summary = pd.DataFrame(formed_data)
+        summary['ticker'] = ticker_list[index]
+        
+        from plotly.subplots import make_subplots
+        
+        # plot data 
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        
+        # plot historic predictions and actuals data    
+        fig.add_trace(go.Scatter(
+            x = results_df['date'],
+            y = results_df['actual'],
+            mode = 'lines',
+            name = 'Actual'
+        ), secondary_y=False)
+        fig.add_trace(go.Scatter(
+            x = results_df['date'],
+            y = results_df['prediction'],
+            mode = 'lines',
+            name = 'Forecast'
+        ), secondary_y=True)
+        
+        fig.update_layout(
+            title = ticker_list[index] + ' Avg ROI: ' + str(avg_roi),
+            xaxis = {'title' : "Date"},
+            yaxis = {'title' : "Close % Change"}
+        )
+        fig.update_yaxes(scaleanchor='y', secondary_y=False)
+        fig.update_yaxes(scaleanchor='y2', secondary_y=True)
+        fig.update_layout(title_font_size=12)
+        
+        #print(mse)
+        
+        input_seq_fut = test_dataset[:,choose_col_in][len(test_dataset)-3:len(test_dataset)].reshape((1,input_seq_len,n_in_features))
+        #print(input_seq_fut)
+        decoder_input_fut = np.zeros((1,output_seq_len,1))
+            
+        pred_fut = model.predict([input_seq_fut,decoder_input_fut])
+        pred_fut = pred_fut.reshape((-1))
+        pred_fut = pred_fut - results_df['mean'].iloc[-1:].values.reshape((-1))
+        #print(pred_fut)
+        #print(results_df['prediction'][len(results_df)].reshape((-1)))
+        
+        #print((pred_fut-results_df['prediction'][len(results_df)].reshape((-1)))/abs(results_df['prediction'][len(results_df)].reshape((-1))))
+        summary['future_pred'] = (pred_fut-results_df['prediction'][len(results_df)].reshape((-1)))/abs(results_df['prediction'][len(results_df)].reshape((-1)))
+        
+        if summary['future_pred'][0] > 1 and pred_fut > std:
+            summary['buy_flag'] = 1
+        else:
+            summary['buy_flag'] = 0
+        print(results_df['same_slope'].sum())
+        print(len(results_df['same_slope']))
+        slope_f = results_df['same_slope'].sum()/len(results_df['same_slope'])
+        print(slope_f)
+        
+        #fig.show()
+        if slope_f > .9: # and avg_roi > 0.04: # try % of correctly predicted slopes as threshold.  
+            s = 7
+            results_df.to_csv(directory + '\\forecasts\\seq2seq_results.csv',index=True,header=False,mode="a")
+            summary.to_csv(directory + '\\forecasts\\seq2seq_summary.csv',index=True,header=False,mode="a")
+            #fig.show()
+        else:
+            s += 1
+			
